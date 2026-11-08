@@ -3636,7 +3636,13 @@ class Accelerator:
         # payloads stay aligned with whatever model list survives them.
         gradients = []
         for model in self._models:
-            grads = {name: param.grad for name, param in model.named_parameters() if param.grad is not None}
+            # Only a save inside an accumulation window has a partial sum to keep. At a sync boundary the
+            # gradients were already consumed by the optimizer step (or zeroed with `set_to_none=False`).
+            grads = (
+                {name: param.grad for name, param in model.named_parameters() if param.grad is not None}
+                if not self.gradient_state.sync_gradients
+                else {}
+            )
             gradients.append({"model_name": get_pretty_name(model), "gradients": grads} if grads else {})
 
         save_location = save_accelerator_state(

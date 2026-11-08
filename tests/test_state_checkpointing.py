@@ -263,6 +263,34 @@ class CheckpointTest(AccelerateTestCase):
             resumed = train(save_at=4)
             assert uninterrupted == resumed
 
+    def test_save_at_sync_boundary_skips_consumed_gradients(self):
+        # Gradients left on the parameters after a completed optimizer step (zero_grad at the start of
+        # the loop, or zero_grad(set_to_none=False)) are not a partial accumulation and must not be saved.
+        with tempfile.TemporaryDirectory() as tmpdir:
+            save_dir = os.path.join(tmpdir, "ckpt")
+            accelerator = Accelerator(cpu=True, project_dir=tmpdir)
+            model = torch.nn.Linear(1, 1, bias=False)
+            optimizer = torch.optim.SGD(model.parameters(), lr=0.1)
+            model, optimizer = accelerator.prepare(model, optimizer)
+            optimizer.zero_grad()
+            accelerator.backward(model(torch.tensor([1.0])).pow(2).sum())
+            optimizer.step()
+            assert model.weight.grad is not None
+            accelerator.save_state(save_dir, safe_serialization=self.use_safetensors)
+            assert not os.path.exists(os.path.join(save_dir, "gradients_0_0.pt"))
+
+            accelerator = Accelerator(cpu=True, gradient_accumulation_steps=2, project_dir=tmpdir)
+            model = torch.nn.Linear(1, 1, bias=False)
+            optimizer = torch.optim.SGD(model.parameters(), lr=0.1)
+            model, optimizer = accelerator.prepare(model, optimizer)
+            for x in (1.0, 2.0):
+                with accelerator.accumulate(model):
+                    accelerator.backward(model(torch.tensor([x])).pow(2).sum())
+                    optimizer.step()
+                    optimizer.zero_grad(set_to_none=False)
+            accelerator.save_state(save_dir, safe_serialization=self.use_safetensors)
+            assert not os.path.exists(os.path.join(save_dir, "gradients_0_0.pt"))
+
     def test_overwrite_checkpoint_removes_stale_gradients(self):
         # Reviewer case 2 (PR #4504): saving into an existing directory at a
         # window boundary (no grads) must remove the gradients file written
@@ -319,9 +347,8 @@ class CheckpointTest(AccelerateTestCase):
 
             # Save mid-window with both models holding partial gradients
             accelerator, first, second = make_pair()
-            with accelerator.accumulate(first):
+            with accelerator.accumulate(first, second):
                 accelerator.backward(first.a.pow(2).sum())
-            with accelerator.accumulate(second):
                 accelerator.backward(second.alpha.pow(3).sum())
             accelerator.save_state(save_dir)
             saved_second_grad = second.alpha.grad.detach().clone()
