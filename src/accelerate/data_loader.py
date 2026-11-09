@@ -186,7 +186,7 @@ class BatchSamplerShard(BatchSampler):
             if idx == 0:
                 # Copy the first batch: the padding below may extend `initial_data` in place,
                 # and we must not mutate batches owned by the underlying sampler.
-                initial_data = list(batch)
+                initial_data = batch[:]
             if len(batch) == self.batch_size:
                 # If the batch is full, we yield the part of it this process is responsible of.
                 yield batch[batch_length * self.process_index : batch_length * (self.process_index + 1)]
